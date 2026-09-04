@@ -1,0 +1,59 @@
+# dsh-wiki-web
+
+Self-hosted web UI over a [dsh](https://github.com/deepseek-ai/deepseek-harness) wiki vault: browse pages with resolved wikilinks, BM25 full-text search, backlinks, and a live lint dashboard. **No Obsidian required** — and no database either: the vault stays a plain Markdown directory you own, fully compatible with Obsidian and any other Markdown tool.
+
+Powered by the [dsh-plugin-wiki-tools](https://github.com/Lion-1209/dsh-plugin-wiki-tools) engine — the same vault, bookkeeping, search, and health-check core the dsh agent tools use.
+
+## Quick start
+
+```sh
+npx dsh-wiki-web --vault /path/to/your/vault
+```
+
+or clone and run:
+
+```sh
+git clone https://github.com/Lion-1209/dsh-wiki-web
+cd dsh-wiki-web && npm install
+node server.js --vault /path/to/your/vault --port 3210
+```
+
+A vault is a directory holding `wiki/` (Markdown pages) and `.raw/` (sources). Don't have one? Open the server in a browser and click **Scaffold vault here** — it creates the folder structure, seed pages, and index/log files for you.
+
+## What you get
+
+| Page | What it shows |
+| --- | --- |
+| Dashboard | page/link/type counts, `hot.md` recent context, `index.md` master catalog, recent activity from `log.md` |
+| `/wiki/<Title>` | rendered page with clickable wikilinks (aliases resolved), frontmatter table, outbound links (dead ones flagged), backlinks |
+| `/search?q=…` | BM25 full-text ranking with snippets, inbound/outbound counts |
+| `/lint` | live health check: dead links, orphan pages, frontmatter gaps, empty sections, stale index and hot cache — every issue with a suggested fix |
+
+Read-only by design: the vault is your source of truth, and the AI does the writing through the agent tools.
+
+## Pairing with an agent
+
+The web UI is the human half. For AI management, point an agent at the same vault:
+
+```sh
+dsh plugin --profile web add dsh-plugin-wiki-tools
+# then set vaultPath in the profile's cordis.patch.yml to the same directory
+```
+
+Chat in dsh: *"把这篇文章收进知识库"* — pages, cross-references, indexes, and the log update automatically; refresh this web UI to see the result.
+
+## Roadmap
+
+- [ ] Graph visualization (force-directed link map)
+- [ ] In-browser editing via `wiki_write` (bookkeeping included for free)
+- [ ] MCP server mode — let any MCP-capable agent manage the same vault
+- [ ] Docker one-liner
+- [ ] Multi-vault support
+
+## How it works
+
+`dsh-plugin-wiki-tools` ships the vault engine as plain ESM (`lib/vault.js`, `lib/search.js`, `lib/lint.js`, `lib/scaffold.js`): path routing, frontmatter completion, BM25 with link-graph context, bookkeeping writes, source delta tracking, and health checks — all operating on a Markdown directory with cross-process advisory locks. This server is a thin `node:http` layer rendering that engine: no database, no build step, one dependency (`marked`) besides the engine itself.
+
+## License
+
+[MIT](LICENSE)

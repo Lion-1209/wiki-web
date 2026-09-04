@@ -1,0 +1,33 @@
+{
+  "name": "dsh-wiki-web",
+  "version": "0.1.0",
+  "description": "Self-hosted web UI for a dsh wiki vault: browse, BM25 search, lint dashboard — no Obsidian required.",
+  "license": "MIT",
+  "type": "module",
+  "main": "server.js",
+  "bin": {
+    "dsh-wiki-web": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "obsidian",
+    "wiki",
+    "knowledge-base",
+    "self-hosted"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Lion-1209/dsh-wiki-web.git"
+  },
+  "dependencies": {
+    "dsh-plugin-wiki-tools": "file:../dsh-plugin-wiki-tools",
+    "marked": "^12.0.0"
+  }
+}
