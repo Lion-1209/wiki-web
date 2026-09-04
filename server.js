@@ -89,6 +89,37 @@ function wikilink(label, target) {
   return `<a class="wikilink" href="/wiki/${encodeURIComponent(target)}">${esc(label)}</a>`
 }
 
+// The master index accumulates duplicate section headings over a vault's life
+// (scaffold + per-type writes) and carries empty sections for types with no
+// entries yet. Collapse both for display: merge same-named sections into the
+// first occurrence and drop sections with no entries.
+function collapseIndexSections(md) {
+  const lines = md.split('\n')
+  const prefix = []
+  const order = []
+  const sections = new Map()
+  let current = null
+  for (const line of lines) {
+    const heading = /^## (.+)$/.exec(line)
+    if (heading !== null) {
+      current = heading[1]
+      if (!sections.has(current.toLowerCase())) {
+        sections.set(current.toLowerCase(), [])
+        order.push(current)
+      }
+      continue
+    }
+    if (current === null) prefix.push(line)
+    else sections.get(current.toLowerCase()).push(line)
+  }
+  const out = [...prefix]
+  for (const original of order) {
+    const text = sections.get(original.toLowerCase()).join('\n').replace(/^\s+|\s+$/g, '')
+    if (text.length > 0) out.push(`## ${original}`, '', text, '')
+  }
+  return out.join('\n')
+}
+
 const CSS = `
 :root { color-scheme: light dark; }
 * { box-sizing: border-box; }
@@ -203,7 +234,7 @@ async function dashboard(res) {
 </div>
 <div class="card"><h2>Pages by type</h2><table><tr>${Object.entries(byType).map(([t, n]) => `<th>${esc(t)}</th>`).join('')}</tr><tr>${Object.values(byType).map((n) => `<td>${n}</td>`).join('')}</tr></table></div>
 <div class="card"><h2>hot.md — recent context</h2>${marked.parse(strip(quick.hot) || '_(missing)_', { async: false })}</div>
-<div class="card"><h2>index.md — master catalog</h2>${marked.parse(strip(quick.index) || '_(missing)_', { async: false })}</div>
+<div class="card"><h2>index.md — master catalog</h2>${marked.parse(collapseIndexSections(strip(quick.index)) || '_(missing)_', { async: false })}</div>
 <div class="card"><h2>Recent activity (log.md)</h2>${marked.parse(view, { async: false })}<p class="meta"><a href="/wiki/log">full log →</a></p></div>`
   html(res, 200, 'Dashboard', body)
 }
@@ -246,12 +277,15 @@ async function pageView(res, rawName, status = 200) {
     .map((key) => `<tr><th>${key}</th><td>${esc(Array.isArray(fields[key]) ? fields[key].join(', ') : String(fields[key]))}</td></tr>`).join('')
 
   const dead = outgoing.filter((target) => resolveLinkTarget(target, names, aliases) === undefined)
+  const rendered = page.name.toLowerCase() === 'index'
+    ? collapseIndexSections(page.content)
+    : page.content
   const body = `
 ${sidebarFor(list, page.name)}
 <h1>${esc(page.name)}</h1>
 <p class="meta">${isMachineryPage(page.name) ? 'vault machinery · ' : ''}${esc(page.rel)}</p>
 ${metaRows ? `<div class="card"><table>${metaRows}</table></div>` : ''}
-<div class="card">${renderMarkdown(page.content)}</div>
+<div class="card">${renderMarkdown(rendered)}</div>
 <div class="card"><h2>Outbound links (${outgoing.length})</h2>${outgoing.length === 0 ? '<p class="meta">none</p>'
     : `<ul>${outgoing.map((target) => `<li>${wikilink(target, target)}${dead.includes(target) ? ' <span class="badge error">dead</span>' : ''}</li>`).join('')}</ul>`}</div>
 <div class="card"><h2>Backlinks (${backlinks.length})</h2>${backlinks.length === 0 ? '<p class="meta">no other page links here yet</p>'
