@@ -25,6 +25,9 @@ import {
   resolveLinkTarget,
   isMachineryPage,
   splitFrontmatter,
+  Vault,
+  TYPE_FOLDERS,
+  PAGE_STATUSES,
 } from 'dsh-plugin-wiki-tools/lib/vault.js'
 import { searchVault, quickView } from 'dsh-plugin-wiki-tools/lib/search.js'
 import { lintVault } from 'dsh-plugin-wiki-tools/lib/lint.js'
@@ -40,17 +43,32 @@ function argValue(flag) {
 const PORT = Number(argValue('--port') ?? process.env.PORT ?? 3210)
 const HOST = argValue('--host') ?? process.env.HOST ?? '127.0.0.1'
 const VAULT = (argValue('--vault') ?? process.env.WIKI_VAULT_PATH ?? join(process.cwd(), 'vault')).replace(/\\/g, '/')
+const GIT_AUTO_COMMIT = process.env.WIKI_GIT_AUTO_COMMIT === '1'
+
+// Write path (edit form): the engine serializes per file, locks cross-process,
+// and keeps frontmatter bookkeeping (created/unknown fields, index, log).
+const vault = new Vault(VAULT, { gitAutoCommit: GIT_AUTO_COMMIT })
 
 // ---------- engine access ----------
 
 let cache = { ts: 0, pages: [] }
+let cachePending = null
 const CACHE_MS = 5000
 
+// force → always rescan; otherwise a 5s TTL plus single-flight (concurrent
+// requests share one in-flight scan instead of stampeding the filesystem).
 async function pages(force = false) {
   if (!force && Date.now() - cache.ts < CACHE_MS) return cache.pages
-  const list = await collectMarkdown(join(VAULT, 'wiki'))
-  cache = { ts: Date.now(), pages: list }
-  return list
+  if (cachePending !== null && !force) return cachePending
+  cachePending = collectMarkdown(WIKI_DIR()).then((list) => {
+    cache = { ts: Date.now(), pages: list }
+    cachePending = null
+    return list
+  }, (error) => {
+    cachePending = null
+    throw error
+  })
+  return cachePending
 }
 
 const vaultReady = () => fs.existsSync(join(VAULT, 'wiki'))
@@ -77,12 +95,20 @@ function renderMarkdown(md) {
   const parts = md.split(/(```[\s\S]*?```|`[^`\n]*`)/g)
   const converted = parts.map((part) => {
     if (part.startsWith('```') || part.startsWith('`')) return part
-    return part
+    // No raw HTML policy: vault content includes text ingested from third
+    //-party web pages, so every `<` outside code becomes literal text. This
+    // kills script/iframe/event-handler injection at the source (marked does
+    // not sanitize); javascript:/data: hrefs from markdown links are filtered
+    // post-parse below.
+    const htmlFree = part.replace(/</g, '&lt;')
+    return htmlFree
       .replace(/!?\[\[([^\]|#]+)#([^\]|]+)\]\]/g, (_, t) => wikilink(t.trim(), t.trim()))
       .replace(/!?\[\[([^\]|#]+)\|([^\]]+)\]\]/g, (_, t, a) => wikilink(a.trim(), t.trim()))
       .replace(/!?\[\[([^\]]+)\]\]/g, (_, t) => wikilink(t.trim(), t.trim()))
   }).join('')
   return marked.parse(converted, { async: false })
+    .replace(/href=["'](javascript|data|vbscript):[^"']*["']/gi, 'href="#"')
+    .replace(/<script\b[\s\S]*?<\/script>/gi, '')
 }
 
 function wikilink(label, target) {
@@ -188,13 +214,15 @@ function layout(title, body) {
 <header>
   <a class="brand" href="/">🗂 wiki vault</a>
   <a href="/">Dashboard</a>
+  <a href="/graph">Graph</a>
   <a href="/lint">Lint</a>
   <a href="/wiki/log">Log</a>
   <a href="/wiki/index">Index</a>
+  <a href="/new">+ New page</a>
   <form action="/search" method="get"><input type="search" name="q" placeholder="Search the vault…" required> <button>Search</button></form>
 </header>
 <main>${body}</main>
-<footer>vault: ${esc(VAULT)} · dsh-wiki-web 0.1.0 · read-only</footer>
+<footer>vault: ${esc(VAULT)} · dsh-wiki-web 0.2.0 · vault stays plain Markdown on disk</footer>
 </body></html>`
 }
 
@@ -233,9 +261,9 @@ async function dashboard(res) {
   <div class="stat"><b>${Object.keys(byFolder).length}</b><span>folders</span></div>
 </div>
 <div class="card"><h2>Pages by type</h2><table><tr>${Object.entries(byType).map(([t, n]) => `<th>${esc(t)}</th>`).join('')}</tr><tr>${Object.values(byType).map((n) => `<td>${n}</td>`).join('')}</tr></table></div>
-<div class="card"><h2>hot.md — recent context</h2>${marked.parse(strip(quick.hot) || '_(missing)_', { async: false })}</div>
-<div class="card"><h2>index.md — master catalog</h2>${marked.parse(collapseIndexSections(strip(quick.index)) || '_(missing)_', { async: false })}</div>
-<div class="card"><h2>Recent activity (log.md)</h2>${marked.parse(view, { async: false })}<p class="meta"><a href="/wiki/log">full log →</a></p></div>`
+<div class="card"><h2>hot.md — recent context</h2>${renderMarkdown(strip(quick.hot) || '_(missing)_')}</div>
+<div class="card"><h2>index.md — master catalog</h2>${renderMarkdown(collapseIndexSections(strip(quick.index)) || '_(missing)_')}</div>
+<div class="card"><h2>Recent activity (log.md)</h2>${renderMarkdown(view)}<p class="meta"><a href="/wiki/log">full log →</a></p></div>`
   html(res, 200, 'Dashboard', body)
 }
 
@@ -255,7 +283,7 @@ function sidebarFor(list, current) {
   return `<div class="sidebar"><div class="card"><b>${list.length} pages</b><ul>${items}</ul></div></div>`
 }
 
-async function pageView(res, rawName, status = 200) {
+async function pageView(res, rawName, saved = false, status = 200) {
   const name = decodeURIComponent(rawName)
   const list = await pages()
   const page = list.find((candidate) => candidate.name === name)
@@ -282,8 +310,9 @@ async function pageView(res, rawName, status = 200) {
     : page.content
   const body = `
 ${sidebarFor(list, page.name)}
+${saved ? '<div class="card" style="border-color:#1a7f37"><span class="badge" style="background:#dafbe1;color:#1a7f37">saved</span> page written through the engine — frontmatter, indexes, and log updated.</div>' : ''}
 <h1>${esc(page.name)}</h1>
-<p class="meta">${isMachineryPage(page.name) ? 'vault machinery · ' : ''}${esc(page.rel)}</p>
+<p class="meta">${isMachineryPage(page.name) ? 'vault machinery · ' : ''}${esc(page.rel)} · <a href="/wiki/${encodeURIComponent(page.name)}?edit=1">✏️ edit</a></p>
 ${metaRows ? `<div class="card"><table>${metaRows}</table></div>` : ''}
 <div class="card">${renderMarkdown(rendered)}</div>
 <div class="card"><h2>Outbound links (${outgoing.length})</h2>${outgoing.length === 0 ? '<p class="meta">none</p>'
@@ -308,6 +337,245 @@ async function searchPage(res, query) {
 }
 
 const SEVERITY_CLASS = { error: 'error', warn: 'warn', info: 'info' }
+
+// ---------- editing ----------
+
+function editForm(res, { title, values, error, status = 200 }) {
+  const page = values.page
+  const locked = page !== undefined && page !== null
+  const typeOptions = Object.keys(TYPE_FOLDERS).map((key) =>
+    `<option value="${key}"${key === values.type ? ' selected' : ''}>${key}</option>`).join('')
+  const statusOptions = ['<option value="">(keep current)</option>']
+    .concat(PAGE_STATUSES.map((key) => `<option value="${key}"${key === values.status ? ' selected' : ''}>${key}</option>`)).join('')
+  const body = `
+<h1>${page ? `Edit: ${esc(title)}` : 'New page'}</h1>
+${error ? `<div class="card"><span class="badge error">error</span> ${esc(error)}</div>` : ''}
+<form method="post" action="/edit">
+<table>
+<tr><th>Title <span class="meta">(also the filename)</span></th><td><input type="text" name="title" value="${esc(title)}" required></td></tr>
+<tr><th>Type</th><td><select name="type"${locked ? ' disabled' : ''}>${typeOptions}</select>${locked ? '<span class="meta"> fixed for existing pages (folder routing would orphan the old file)</span>' : ''}</td></tr>
+<tr><th>Status</th><td><select name="status">${statusOptions}</select></td></tr>
+<tr><th>Tags <span class="meta">(comma separated)</span></th><td><input type="text" name="tags" value="${esc(values.tags)}"></td></tr>
+<tr><th>Summary <span class="meta">(index line; blank = first content line)</span></th><td><input type="text" name="summary" value="${esc(values.summary)}"></td></tr>
+</table>
+<p><textarea name="content" rows="22" style="width:100%" required>${esc(values.content)}</textarea></p>
+<p><button type="submit">Save</button> ${title ? `<a href="/wiki/${encodeURIComponent(title)}">Cancel</a>` : '<a href="/">Cancel</a>'}
+<span class="meta">saving runs the engine's bookkeeping: frontmatter completion, master/folder index, log entry${GIT_AUTO_COMMIT ? ', git commit' : ''}</span></p>
+</form>`
+  html(res, status, page ? `Edit ${title}` : 'New page', body)
+}
+
+function editValuesFor(page) {
+  const fields = page?.fields ?? {}
+  return {
+    page,
+    type: typeof fields.type === 'string' && fields.type in TYPE_FOLDERS ? fields.type : 'concept',
+    status: PAGE_STATUSES.includes(fields.status) ? fields.status : '',
+    tags: Array.isArray(fields.tags) ? fields.tags.join(', ') : '',
+    summary: '',
+    content: page?.content ?? '',
+  }
+}
+
+async function editGet(res, rawName) {
+  if (!vaultReady()) return setupPage(res)
+  const name = decodeURIComponent(rawName)
+  const list = await pages()
+  const page = list.find((candidate) => candidate.name === name)
+    ?? list.find((candidate) => candidate.name.toLowerCase() === name.toLowerCase())
+  if (isMachineryPage(name) && page === undefined) {
+    return html(res, 400, 'Reserved', `<h1>Reserved name</h1><p><code>${esc(name)}</code> is vault machinery. <a href="/wiki/${encodeURIComponent(name)}">View it instead.</a></p>`)
+  }
+  const values = editValuesFor(page)
+  editForm(res, { title: page?.name ?? name, values, error: undefined })
+}
+
+async function editPost(req, res) {
+  let raw
+  try {
+    raw = await readBody(req)
+  } catch (error) {
+    res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8' })
+    return res.end(error.message)
+  }
+  const form = new URLSearchParams(raw)
+  const title = (form.get('title') ?? '').trim()
+  const content = form.get('content') ?? ''
+  const submitted = { title, type: form.get('type') ?? '', status: form.get('status') ?? '', tags: form.get('tags') ?? '', summary: form.get('summary') ?? '', content, page: undefined }
+
+  if (title.length === 0 || /[\\/\0]|\.\./.test(title)) {
+    return editForm(res, { title, values: submitted, error: 'title is required and must not contain path separators', status: 400 })
+  }
+  if (content.trim().length === 0) {
+    return editForm(res, { title, values: submitted, error: 'content is required', status: 400 })
+  }
+
+  const list = await pages(true)
+  const existing = list.find((candidate) => candidate.name === title)
+  if (existing === undefined && isMachineryPage(title)) {
+    return editForm(res, { title, values: submitted, error: `"${title}" is a reserved vault-machinery name (index, log, hot, _index, lint reports)`, status: 400 })
+  }
+  const fields = existing?.fields ?? {}
+  // A disabled type select submits nothing; an existing page keeps its type
+  // (changing it would route to a new folder and orphan the old file).
+  const existingType = typeof fields.type === 'string' && fields.type in TYPE_FOLDERS ? fields.type : undefined
+  const type = Object.keys(TYPE_FOLDERS).includes(submitted.type) ? submitted.type : (existingType ?? 'meta')
+  const status = PAGE_STATUSES.includes(submitted.status) ? submitted.status : undefined
+  const tags = submitted.tags.split(',').map((tag) => tag.trim()).filter(Boolean)
+  const summary = submitted.summary.trim() || undefined
+
+  try {
+    const result = await vault.writePage({
+      type, title, content,
+      tags: tags.length > 0 ? tags : undefined,
+      status, summary,
+    })
+    cache = { ts: 0, pages: [] }
+    res.writeHead(303, { location: `/wiki/${encodeURIComponent(result.title)}?saved=1` })
+    return res.end()
+  } catch (error) {
+    const message = error.message.split(VAULT).join('<vault>')
+    return editForm(res, { title, values: submitted, error: message, status: 400 })
+  }
+}
+
+// ---------- graph ----------
+
+async function graphData() {
+  const list = await pages()
+  const names = new Set(list.map((page) => page.name))
+  const aliases = buildAliasMap(list)
+  const nodes = list.map((page) => ({
+    id: page.name,
+    folder: folderOf(page),
+    type: String(page.fields?.type ?? 'untyped'),
+    machinery: isMachineryPage(page.name),
+    degree: 0,
+  }))
+  const byId = new Map(nodes.map((node) => [node.id, node]))
+  const seen = new Set()
+  const links = []
+  for (const page of list) {
+    for (const target of page.links) {
+      const resolved = resolveLinkTarget(target, names, aliases)
+      if (resolved === undefined || resolved === page.name) continue
+      const key = [page.name, resolved].sort().join('\u0000')
+      if (seen.has(key)) continue
+      seen.add(key)
+      links.push({ source: page.name, target: resolved })
+      byId.get(page.name).degree += 1
+      byId.get(resolved).degree += 1
+    }
+  }
+  return { nodes, links }
+}
+
+function graphPage(res) {
+  const body = `
+<h1>Link graph</h1>
+<p class="meta">Every page is a node, every resolved wikilink an edge (duplicates merged, self-links dropped). Color = folder, size = degree. Drag to arrange; click a node to open the page.</p>
+<div class="card" style="padding:6px"><canvas id="graph" style="width:100%; height:600px; display:block"></canvas></div>
+<div class="card" id="legend"></div>
+<script>
+(async () => {
+  const { nodes, links } = await (await fetch('/api/graph')).json()
+  const canvas = document.getElementById('graph')
+  const dpr = window.devicePixelRatio || 1
+  const W = canvas.clientWidth, H = 600
+  canvas.width = W * dpr; canvas.height = H * dpr
+  const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr)
+  // The O(n²) simulation freezes the tab on very large vaults; past the cap,
+  // keep the ring layout and edges without simulation.
+  const simulate = nodes.length <= 1500
+
+  const palette = ['#4a90d9', '#e07b39', '#2ecc71', '#9b59b6', '#e74c3c', '#f1c40f', '#1abc9c', '#8b949e', '#d63384', '#20c997']
+  const folders = [...new Set(nodes.map(n => n.folder))]
+  const colorOf = f => palette[folders.indexOf(f) % palette.length]
+  const maxDeg = Math.max(1, ...nodes.map(n => n.degree))
+  const r = n => 3 + Math.sqrt(n.degree / maxDeg) * 11
+
+  nodes.forEach((n, i) => {
+    const a = (i / nodes.length) * Math.PI * 2
+    n.x = W / 2 + Math.cos(a) * W * 0.38
+    n.y = H / 2 + Math.sin(a) * H * 0.38
+    n.vx = 0; n.vy = 0
+  })
+  const byId = new Map(nodes.map(n => [n.id, n]))
+
+  let alpha = 1
+  function tick() {
+    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i], b = nodes[j]
+      let dx = b.x - a.x, dy = b.y - a.y
+      let d2 = dx * dx + dy * dy || 1
+      const dist = Math.sqrt(d2), min = r(a) + r(b) + 12
+      const f = (alpha * 2400) / d2
+      dx /= dist; dy /= dist
+      if (dist < min) { a.vx -= dx * (min - dist) * 0.5; a.vy -= dy * (min - dist) * 0.5; b.vx += dx * (min - dist) * 0.5; b.vy += dy * (min - dist) * 0.5 }
+      a.vx -= dx * f; a.vy -= dy * f; b.vx += dx * f; b.vy += dy * f
+    }
+    for (const l of links) {
+      const a = byId.get(l.source), b = byId.get(l.target)
+      const dx = b.x - a.x, dy = b.y - a.y, dist = Math.sqrt(dx * dx + dy * dy) || 1
+      const f = (dist - 90) * 0.02 * alpha
+      a.vx += dx / dist * f; a.vy += dy / dist * f
+      b.vx -= dx / dist * f; b.vy -= dy / dist * f
+    }
+    for (const n of nodes) {
+      n.vx += (W / 2 - n.x) * 0.003 * alpha; n.vy += (H / 2 - n.y) * 0.004 * alpha
+      n.x += n.vx; n.y += n.vy; n.vx *= 0.85; n.vy *= 0.85
+      n.x = Math.max(20, Math.min(W - 20, n.x)); n.y = Math.max(16, Math.min(H - 16, n.y))
+    }
+    alpha *= 0.985
+  }
+
+  let drag = null, hover = null
+  canvas.addEventListener('mousemove', e => {
+    const rect = canvas.getBoundingClientRect()
+    const x = e.clientX - rect.left, y = e.clientY - rect.top
+    const hit = nodes.find(n => (n.x - x) ** 2 + (n.y - y) ** 2 <= r(n) ** 2 + 16)
+    if (drag) { drag.x = x; drag.y = y; drag.vx = 0; drag.vy = 0; alpha = Math.max(alpha, 0.35) }
+    hover = hit; canvas.style.cursor = hit ? 'pointer' : 'default'
+  })
+  canvas.addEventListener('mousedown', () => { if (hover) { drag = hover; alpha = Math.max(alpha, 0.4) } })
+  window.addEventListener('mouseup', () => { drag = null })
+  canvas.addEventListener('click', () => { if (hover) location.href = '/wiki/' + encodeURIComponent(hover.id) })
+
+  function frame() {
+    for (let i = 0; i < 3 && alpha > 0.02 && simulate; i++) tick()
+    ctx.clearRect(0, 0, W, H)
+    ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1
+    for (const l of links) {
+      const a = byId.get(l.source), b = byId.get(l.target)
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+    }
+    const labelCut = Math.min(nodes.length, nodes.filter(n => n.degree > 1).length + 8)
+    const sorted = [...nodes].sort((a, b) => b.degree - a.degree)
+    for (const n of nodes) {
+      ctx.beginPath()
+      ctx.fillStyle = n.machinery ? '#8b949e' : colorOf(n.folder)
+      ctx.arc(n.x, n.y, r(n), 0, Math.PI * 2); ctx.fill()
+      if (n === hover) { ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke() }
+    }
+    ctx.fillStyle = '#c9d1d9'; ctx.font = '11px sans-serif'; ctx.textAlign = 'center'
+    for (const n of sorted.slice(0, labelCut)) {
+      if (r(n) > 4.5 || n === hover) ctx.fillText(n.id, n.x, n.y - r(n) - 4)
+    }
+    if (hover) { ctx.fillStyle = '#e6edf3'; ctx.fillText(hover.id + ' (' + hover.degree + ')', hover.x, hover.y - r(hover) - 4) }
+    requestAnimationFrame(frame)
+  }
+  frame()
+
+  const legend = document.getElementById('legend')
+  legend.innerHTML = '<b>' + nodes.length + '</b> nodes · <b>' + links.length + '</b> edges · ' +
+    folders.map(f => '<span style="color:' + colorOf(f) + '">■</span> ' + f).join(' · ') +
+    ' · <span style="color:#8b949e">■</span> machinery'
+})()
+</script>`
+  html(res, 200, 'Graph', body)
+}
+
+
 
 async function lintPage(res) {
   const { issues, summary, reportPath } = await lintVault(VAULT)
@@ -352,8 +620,13 @@ ${message ? `<p class="meta">${esc(message)}</p>` : ''}
 }
 
 async function scaffold(req, res) {
-  let raw = ''
-  for await (const chunk of req) raw += chunk
+  let raw
+  try {
+    raw = await readBody(req)
+  } catch (error) {
+    res.writeHead(413, { 'content-type': 'text/plain; charset=utf-8' })
+    return res.end(error.message)
+  }
   const form = new URLSearchParams(raw)
   const purpose = form.get('purpose')?.trim() || undefined
   fs.mkdirSync(join(VAULT, 'wiki'), { recursive: true })
@@ -370,18 +643,81 @@ async function scaffold(req, res) {
 
 // ---------- server ----------
 
+const MAX_BODY_BYTES = 5 * 1024 * 1024
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const length = Number(req.headers['content-length'] ?? 0)
+    if (Number.isFinite(length) && length > MAX_BODY_BYTES) {
+      reject(Object.assign(new Error('request body too large (5 MB limit)'), { code: 'E_TOO_LARGE' }))
+      req.destroy()
+      return
+    }
+    // setEncoding makes Node reassemble multibyte UTF-8 across chunk boundaries;
+    // manual Buffer→string concatenation would corrupt split characters.
+    req.setEncoding('utf8')
+    let raw = ''
+    req.on('data', (chunk) => {
+      raw += chunk
+      if (raw.length > MAX_BODY_BYTES) {
+        reject(Object.assign(new Error('request body too large (5 MB limit)'), { code: 'E_TOO_LARGE' }))
+        req.destroy()
+      }
+    })
+    req.on('end', () => resolve(raw))
+    req.on('error', reject)
+  })
+}
+
+// Cross-site request forgery: any web page can HTML-form-POST to a loopback
+// server without cookies. Defense for a tokenless local tool: a browser always
+// attaches Origin to cross-origin POSTs, and it cannot forge the victim's
+// origin. Requests without Origin (curl, same-origin some cases) pass; when
+// the server binds a loopback address the Host header is pinned too, which
+// also kills DNS-rebinding.
+function csrfGuard(req) {
+  const host = req.headers.host ?? ''
+  const origin = req.headers.origin
+  const isLoopbackBind = ['127.0.0.1', 'localhost', '::1'].includes(HOST)
+  if (isLoopbackBind && host !== `${HOST}:${PORT}` && host !== `${HOST}`) {
+    return `Host header mismatch (${esc(host)}) — possible DNS rebinding`
+  }
+  if (origin !== undefined) {
+    const allowed = [`http://${host}`, `https://${host}`]
+    if (!allowed.includes(origin)) {
+      return `Origin ${esc(origin)} is not this server — cross-site write blocked`
+    }
+  }
+  return null
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`)
   const pathname = url.pathname
   try {
+    if (req.method === 'POST') {
+      const csrfError = csrfGuard(req)
+      if (csrfError !== null) {
+        res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' })
+        return res.end(csrfError)
+      }
+    }
     if (req.method === 'POST' && pathname === '/setup') return await scaffold(req, res)
+    if (req.method === 'POST' && pathname === '/edit') return await editPost(req, res)
     if (pathname === '/favicon.ico') { res.writeHead(204); return res.end() }
     if (pathname === '/' || pathname === '/index.html') return await dashboard(res)
     if (pathname === '/lint') return await lintPage(res)
+    if (pathname === '/graph') return graphPage(res)
+    if (pathname === '/api/graph') {
+      res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' })
+      return res.end(JSON.stringify(await graphData()))
+    }
     if (pathname === '/search') return await searchPage(res, url.searchParams.get('q'))
+    if (pathname === '/new') return await editGet(res, '')
     if (pathname.startsWith('/wiki/')) {
       if (!vaultReady()) return setupPage(res)
-      return await pageView(res, pathname.slice('/wiki/'.length))
+      if (url.searchParams.get('edit') === '1') return await editGet(res, pathname.slice('/wiki/'.length))
+      return await pageView(res, pathname.slice('/wiki/'.length), url.searchParams.get('saved') === '1')
     }
     if (!vaultReady()) return setupPage(res)
     html(res, 404, 'Not found', `<h1>Not found</h1><p><a href="/">Back to the dashboard</a></p>`)
