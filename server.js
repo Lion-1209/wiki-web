@@ -16,7 +16,7 @@
  */
 
 import http from 'node:http'
-import fs from 'node:fs'
+import fs, { readFileSync } from 'node:fs'
 import { join, relative, sep } from 'node:path'
 import { marked } from 'marked'
 import {
@@ -209,6 +209,7 @@ function layout(title, body) {
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} — dsh-wiki-web</title>
+<script>window.addEventListener('error', e => { (window.__errs = window.__errs || []).push(String(e.message)) }); window.addEventListener('unhandledrejection', e => { (window.__errs = window.__errs || []).push('rejection: ' + (e.reason && e.reason.stack ? e.reason.stack.split('\n').slice(0, 2).join(' | ') : String(e.reason))) })</script>
 <style>${CSS}</style>
 </head><body>
 <header>
@@ -473,9 +474,13 @@ async function graphData() {
 function graphPage(res) {
   const body = `
 <h1>Link graph</h1>
-<p class="meta">Every page is a node, every resolved wikilink an edge (duplicates merged, self-links dropped). Color = folder, size = degree. Drag to arrange; click a node to open the page.</p>
+<p class="meta">Every page is a node, every resolved wikilink an edge (duplicates merged, self-links dropped). Color = folder, size = degree. Drag a node to pin it under the pointer; release to let the layout resettle. Click (without dragging) opens the page.</p>
 <div class="card" style="padding:6px"><canvas id="graph" style="width:100%; height:600px; display:block"></canvas></div>
 <div class="card" id="legend"></div>
+<script src="/vendor/d3-dispatch.min.js"></script>
+<script src="/vendor/d3-quadtree.min.js"></script>
+<script src="/vendor/d3-timer.min.js"></script>
+<script src="/vendor/d3-force.min.js"></script>
 <script>
 (async () => {
   const { nodes, links } = await (await fetch('/api/graph')).json()
@@ -484,9 +489,6 @@ function graphPage(res) {
   const W = canvas.clientWidth, H = 600
   canvas.width = W * dpr; canvas.height = H * dpr
   const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr)
-  // The O(n²) collision pass freezes the tab on very large vaults; past the
-  // cap, keep the ring layout and edges without simulation.
-  const simulate = nodes.length <= 1500
 
   const palette = ['#4a90d9', '#e07b39', '#2ecc71', '#9b59b6', '#e74c3c', '#f1c40f', '#1abc9c', '#8b949e', '#d63384', '#20c997']
   const folders = [...new Set(nodes.map(n => n.folder))]
@@ -494,95 +496,24 @@ function graphPage(res) {
   const maxDeg = Math.max(1, ...nodes.map(n => n.degree))
   const r = n => 3 + Math.sqrt(n.degree / maxDeg) * 11
 
-  // Ten-Minute-Physics style core (matthias-research.github.io): Verlet
-  // integration with a fixed timestep, position-based constraint solving.
-  // Positions are the state (velocity is implicit), constraints only move
-  // positions — unconditionally stable, so no force pulses, no flicker.
-  nodes.forEach((n, i) => {
-    const a = (i / nodes.length) * Math.PI * 2
-    n.x = W / 2 + Math.cos(a) * W * 0.38
-    n.y = H / 2 + Math.sin(a) * H * 0.38
-    n.px = n.x; n.py = n.y
-    n.mass = 1 + n.degree * 0.3
-  })
-  const byId = new Map(nodes.map(n => [n.id, n]))
+  // d3-force: the battle-tested layout engine. alpha decays automatically, so
+  // the graph settles to a full stop; dragging pins the node with fx/fy and
+  // reheats via alphaTarget — the canonical, deterministic drag pattern.
+  const simulation = d3.forceSimulation(nodes)
+    .force('link', d3.forceLink(links).id(d => d.id).distance(90).strength(0.4))
+    .force('charge', d3.forceManyBody().strength(-280))
+    .force('collide', d3.forceCollide().radius(n => r(n) + 9))
+    .force('center', d3.forceCenter(W / 2, H / 2))
+    .alphaDecay(0.028)
 
-  const DT = 1 / 60
-  const SUBSTEPS = nodes.length > 400 ? 1 : 3
-  const DAMPING = 0.98
-  const REST = 90
-  let dragNode = null, dragX = 0, dragY = 0, hover = null
+  let hover = null
+  let downAt = null        // { x, y, node, moved } while a pointer is down
+  let suppressClick = false
 
-  function substep() {
-    // integrate (dragged node is pointer-driven instead)
-    let maxMove = 0
-    for (const n of nodes) {
-      if (n === dragNode) continue
-      const vx = (n.x - n.px) * DAMPING
-      const vy = (n.y - n.py) * DAMPING
-      n.px = n.x; n.py = n.y
-      n.x += vx + (W / 2 - n.x) * 0.0006
-      n.y += vy + (H / 2 - n.y) * 0.0009
-      const move = Math.abs(vx) + Math.abs(vy)
-      if (move > maxMove) maxMove = move
-    }
-    if (dragNode) {
-      // critically damped follow; px trails x so release carries momentum
-      dragNode.px = dragNode.x; dragNode.py = dragNode.y
-      dragNode.x += (dragX - dragNode.x) * 0.45
-      dragNode.y += (dragY - dragNode.y) * 0.45
-      maxMove = 1
-    }
-    // Sequential (Gauss-Seidel) relaxation of a cyclic graph pumps a slow
-    // systematic rotation — one direction per substep, forever. Shuffling the
-    // edge order every substep removes the directional bias (Müller's cloth
-    // tutorials do the same); residual jitter decays via DAMPING.
-    for (let i = links.length - 1; i > 0; i--) {
-      const j = (Math.random() * (i + 1)) | 0
-      const t = links[i]; links[i] = links[j]; links[j] = t
-    }
-    // edges relax toward rest length, mass-weighted, dragged node immovable
-    for (const l of links) {
-      const a = byId.get(l.source), b = byId.get(l.target)
-      const dx = b.x - a.x, dy = b.y - a.y
-      const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001
-      const diff = (dist - REST) / dist * 0.5
-      const wa = (a === dragNode) ? 0 : 1 / a.mass
-      const wb = (b === dragNode) ? 0 : 1 / b.mass
-      const sum = wa + wb || 1
-      const ax = a.x, ay = a.y, bx = b.x, by = b.y
-      a.x += dx * diff * (wa / sum); a.y += dy * diff * (wa / sum)
-      b.x -= dx * diff * (wb / sum); b.y -= dy * diff * (wb / sum)
-      const moved = Math.abs(a.x - ax) + Math.abs(a.y - ay) + Math.abs(b.x - bx) + Math.abs(b.y - by)
-      if (moved > maxMove) maxMove = moved
-    }
-    // overlap separation, position based
-    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
-      const a = nodes[i], b = nodes[j]
-      const min = r(a) + r(b) + 14
-      let dx = b.x - a.x, dy = b.y - a.y
-      const d2 = dx * dx + dy * dy
-      if (d2 >= min * min || d2 === 0) continue
-      const dist = Math.sqrt(d2)
-      const push = (min - dist) / dist * 0.35
-      dx *= push; dy *= push
-      if (a !== dragNode) { a.x -= dx * 0.5; a.y -= dy * 0.5 }
-      if (b !== dragNode) { b.x += dx * 0.5; b.y += dy * 0.5 }
-      const moved = Math.abs(dx) + Math.abs(dy)
-      if (moved > maxMove) maxMove = moved
-    }
-    for (const n of nodes) {
-      const rad = r(n)
-      if (n.x < rad) { n.x = rad; n.px = n.x }
-      if (n.x > W - rad) { n.x = W - rad; n.px = n.x }
-      if (n.y < rad) { n.y = rad; n.py = n.y }
-      if (n.y > H - rad) { n.y = H - rad; n.py = n.y }
-    }
-    return maxMove
-  }
-
-  function hitTest(x, y, prefer) {
+  function hitTest(e, prefer) {
     if (prefer !== undefined && prefer !== null) return prefer
+    const rect = canvas.getBoundingClientRect()
+    const x = e.clientX - rect.left, y = e.clientY - rect.top
     let best = null, bestD = 1e9
     for (const n of nodes) {
       const d2 = (n.x - x) ** 2 + (n.y - y) ** 2
@@ -591,52 +522,48 @@ function graphPage(res) {
     return best
   }
 
-  let downX = 0, downY = 0, movedFar = false
-  canvas.addEventListener('pointerdown', (e) => {
-    const rect = canvas.getBoundingClientRect()
-    const x = e.clientX - rect.left, y = e.clientY - rect.top
-    downX = x; downY = y; movedFar = false
-    const hit = hitTest(x, y)
-    settled = false
+  // mouse events (not pointer events): they fire for real users and for
+  // synthetic input alike, and window-level move/up keep the drag alive when
+  // the pointer leaves the canvas mid-drag.
+  canvas.addEventListener('mousedown', (e) => {
+    const hit = hitTest(e, null)
+    downAt = { x: e.clientX, y: e.clientY, node: hit, moved: false }
     if (hit !== null) {
-      dragNode = hit; dragX = x; dragY = y; hover = hit
-      canvas.setPointerCapture(e.pointerId)
-      canvas.style.cursor = 'grabbing'
+      hit.fx = hit.x; hit.fy = hit.y
+      hover = hit
+      simulation.alphaTarget(0.25).restart()
     }
+    canvas.style.cursor = hit !== null ? 'grabbing' : 'default'
   })
-  canvas.addEventListener('pointermove', (e) => {
-    const rect = canvas.getBoundingClientRect()
-    const x = e.clientX - rect.left, y = e.clientY - rect.top
-    if (Math.abs(x - downX) + Math.abs(y - downY) > 6) movedFar = true
-    if (dragNode !== null) { dragX = x; dragY = y; hover = dragNode }
-    else hover = hitTest(x, y)
-    canvas.style.cursor = dragNode !== null ? 'grabbing' : (hover ? 'grab' : 'default')
+  window.addEventListener('mousemove', (e) => {
+    if (downAt !== null && downAt.node !== null) {
+      const rect = canvas.getBoundingClientRect()
+      downAt.node.fx = e.clientX - rect.left
+      downAt.node.fy = e.clientY - rect.top
+      if (Math.abs(e.clientX - downAt.x) + Math.abs(e.clientY - downAt.y) > 6) downAt.moved = true
+    } else {
+      hover = hitTest(e, null)
+    }
+    canvas.style.cursor = (downAt !== null && downAt.node !== null) ? 'grabbing' : (hover ? 'grab' : 'default')
   })
-  canvas.addEventListener('pointerup', () => { dragNode = null; canvas.style.cursor = 'default' })
+  window.addEventListener('mouseup', () => {
+    if (downAt !== null && downAt.node !== null) {
+      downAt.node.fx = null; downAt.node.fy = null
+      simulation.alphaTarget(0)
+      suppressClick = downAt.moved
+    }
+    downAt = null
+  })
   canvas.addEventListener('click', () => {
-    if (hover !== null && !movedFar) location.href = '/wiki/' + encodeURIComponent(hover.id)
+    if (!suppressClick && hover !== null) location.href = '/wiki/' + encodeURIComponent(hover.id)
+    suppressClick = false
   })
 
-  let settled = false
-  let simError = null
-  function frame() {
-    // The render loop must survive simulation bugs: a thrown error here used
-    // to kill the rAF chain and blank the whole canvas.
-    if (simulate && !settled) {
-      try {
-        let move = 0
-        for (let i = 0; i < SUBSTEPS; i++) move = Math.max(move, substep())
-        if (move < 0.06 && dragNode === null) settled = true
-        simError = null
-      } catch (error) {
-        simError = String(error)
-      }
-    }
+  function draw() {
     ctx.clearRect(0, 0, W, H)
     ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1
     for (const l of links) {
-      const a = byId.get(l.source), b = byId.get(l.target)
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke()
+      ctx.beginPath(); ctx.moveTo(l.source.x, l.source.y); ctx.lineTo(l.target.x, l.target.y); ctx.stroke()
     }
     const labelCut = Math.min(nodes.length, nodes.filter(n => n.degree > 1).length + 8)
     const sorted = [...nodes].sort((a, b) => b.degree - a.degree)
@@ -651,21 +578,18 @@ function graphPage(res) {
       if (r(n) > 4.5 || n === hover) ctx.fillText(n.id, n.x, n.y - r(n) - 4)
     }
     if (hover) { ctx.fillStyle = '#e6edf3'; ctx.fillText(hover.id + ' (' + hover.degree + ')', hover.x, hover.y - r(hover) - 4) }
-    requestAnimationFrame(frame)
+    requestAnimationFrame(draw)
   }
-  frame()
+  draw()
 
   const legend = document.getElementById('legend')
   legend.innerHTML = '<b>' + nodes.length + '</b> nodes · <b>' + links.length + '</b> edges · ' +
     folders.map(f => '<span style="color:' + colorOf(f) + '">■</span> ' + f).join(' · ') +
-    ' · <span style="color:#8b949e">■</span> machinery' +
-    (simError ? ' · <span style="color:#e74c3c">sim error: ' + simError + '</span>' : '')
-})()
+    ' · <span style="color:#8b949e">■</span> machinery'
+} })()
 </script>`
   html(res, 200, 'Graph', body)
 }
-
-
 
 async function lintPage(res) {
   const { issues, summary, reportPath } = await lintVault(VAULT)
@@ -781,10 +705,26 @@ function csrfGuard(req) {
   return null
 }
 
+// d3-force's UMD bundle reads its dependencies (dispatch/quadtree/timer)
+// from the shared global d3 namespace, so all four files load in order.
+const BUNDLES = {
+  'd3-dispatch.min.js': readFileSync(new URL('./node_modules/d3-dispatch/dist/d3-dispatch.min.js', import.meta.url)),
+  'd3-quadtree.min.js': readFileSync(new URL('./node_modules/d3-quadtree/dist/d3-quadtree.min.js', import.meta.url)),
+  'd3-timer.min.js': readFileSync(new URL('./node_modules/d3-timer/dist/d3-timer.min.js', import.meta.url)),
+  'd3-force.min.js': readFileSync(new URL('./node_modules/d3-force/dist/d3-force.min.js', import.meta.url)),
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`)
   const pathname = url.pathname
   try {
+    if (pathname.startsWith('/vendor/d3-')) {
+      const name = pathname.slice('/vendor/'.length)
+      const file = Object.prototype.hasOwnProperty.call(BUNDLES, name) ? BUNDLES[name] : undefined
+      if (file === undefined) { res.writeHead(404); return res.end() }
+      res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' })
+      return res.end(file)
+    }
     if (req.method === 'POST') {
       const csrfError = csrfGuard(req)
       if (csrfError !== null) {
