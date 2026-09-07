@@ -484,8 +484,8 @@ function graphPage(res) {
   const W = canvas.clientWidth, H = 600
   canvas.width = W * dpr; canvas.height = H * dpr
   const ctx = canvas.getContext('2d'); ctx.scale(dpr, dpr)
-  // The O(n²) simulation freezes the tab on very large vaults; past the cap,
-  // keep the ring layout and edges without simulation.
+  // The O(n²) collision pass freezes the tab on very large vaults; past the
+  // cap, keep the ring layout and edges without simulation.
   const simulate = nodes.length <= 1500
 
   const palette = ['#4a90d9', '#e07b39', '#2ecc71', '#9b59b6', '#e74c3c', '#f1c40f', '#1abc9c', '#8b949e', '#d63384', '#20c997']
@@ -494,55 +494,112 @@ function graphPage(res) {
   const maxDeg = Math.max(1, ...nodes.map(n => n.degree))
   const r = n => 3 + Math.sqrt(n.degree / maxDeg) * 11
 
+  // Ten-Minute-Physics style core (matthias-research.github.io): Verlet
+  // integration with a fixed timestep, position-based constraint solving.
+  // Positions are the state (velocity is implicit), constraints only move
+  // positions — unconditionally stable, so no force pulses, no flicker.
   nodes.forEach((n, i) => {
     const a = (i / nodes.length) * Math.PI * 2
     n.x = W / 2 + Math.cos(a) * W * 0.38
     n.y = H / 2 + Math.sin(a) * H * 0.38
-    n.vx = 0; n.vy = 0
+    n.px = n.x; n.py = n.y
+    n.mass = 1 + n.degree * 0.3
   })
   const byId = new Map(nodes.map(n => [n.id, n]))
 
-  let alpha = 1
-  function tick() {
-    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
-      const a = nodes[i], b = nodes[j]
-      let dx = b.x - a.x, dy = b.y - a.y
-      let d2 = dx * dx + dy * dy || 1
-      const dist = Math.sqrt(d2), min = r(a) + r(b) + 12
-      const f = (alpha * 2400) / d2
-      dx /= dist; dy /= dist
-      if (dist < min) { a.vx -= dx * (min - dist) * 0.5; a.vy -= dy * (min - dist) * 0.5; b.vx += dx * (min - dist) * 0.5; b.vy += dy * (min - dist) * 0.5 }
-      a.vx -= dx * f; a.vy -= dy * f; b.vx += dx * f; b.vy += dy * f
+  const DT = 1 / 60
+  const SUBSTEPS = nodes.length > 400 ? 1 : 3
+  const DAMPING = 0.98
+  const REST = 90
+  let dragNode = null, dragX = 0, dragY = 0, hover = null
+
+  function substep() {
+    // integrate (dragged node is pointer-driven instead)
+    for (const n of nodes) {
+      if (n === dragNode) continue
+      const vx = (n.x - n.px) * DAMPING
+      const vy = (n.y - n.py) * DAMPING
+      n.px = n.x; n.py = n.y
+      n.x += vx + (W / 2 - n.x) * 0.0006
+      n.y += vy + (H / 2 - n.y) * 0.0009
     }
+    if (dragNode) {
+      // critically damped follow; px trails x so release carries momentum
+      dragNode.px = dragNode.x; dragNode.py = dragNode.y
+      dragNode.x += (dragX - dragNode.x) * 0.45
+      dragNode.y += (dragY - dragNode.y) * 0.45
+    }
+    // edges relax toward rest length, mass-weighted, dragged node immovable
     for (const l of links) {
       const a = byId.get(l.source), b = byId.get(l.target)
-      const dx = b.x - a.x, dy = b.y - a.y, dist = Math.sqrt(dx * dx + dy * dy) || 1
-      const f = (dist - 90) * 0.02 * alpha
-      a.vx += dx / dist * f; a.vy += dy / dist * f
-      b.vx -= dx / dist * f; b.vy -= dy / dist * f
+      const dx = b.x - a.x, dy = b.y - a.y
+      const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001
+      const diff = (dist - REST) / dist * 0.5
+      const wa = (a === dragNode) ? 0 : 1 / a.mass
+      const wb = (b === dragNode) ? 0 : 1 / b.mass
+      const sum = wa + wb || 1
+      a.x += dx * diff * (wa / sum); a.y += dy * diff * (wa / sum)
+      b.x -= dx * diff * (wb / sum); b.y -= dy * diff * (wb / sum)
+    }
+    // overlap separation, position based
+    for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
+      const a = nodes[i], b = nodes[j]
+      const min = r(a) + r(b) + 14
+      let dx = b.x - a.x, dy = b.y - a.y
+      const d2 = dx * dx + dy * dy
+      if (d2 >= min * min || d2 === 0) continue
+      const dist = Math.sqrt(d2)
+      const push = (min - dist) / dist * 0.35
+      dx *= push; dy *= push
+      if (a !== dragNode) { a.x -= dx * 0.5; a.y -= dy * 0.5 }
+      if (b !== dragNode) { b.x += dx * 0.5; b.y += dy * 0.5 }
     }
     for (const n of nodes) {
-      n.vx += (W / 2 - n.x) * 0.003 * alpha; n.vy += (H / 2 - n.y) * 0.004 * alpha
-      n.x += n.vx; n.y += n.vy; n.vx *= 0.85; n.vy *= 0.85
-      n.x = Math.max(20, Math.min(W - 20, n.x)); n.y = Math.max(16, Math.min(H - 16, n.y))
+      const rad = r(n)
+      if (n.x < rad) { n.x = rad; n.px = n.x }
+      if (n.x > W - rad) { n.x = W - rad; n.px = n.x }
+      if (n.y < rad) { n.y = rad; n.py = n.y }
+      if (n.y > H - rad) { n.y = H - rad; n.py = n.y }
     }
-    alpha *= 0.985
   }
 
-  let drag = null, hover = null
-  canvas.addEventListener('mousemove', e => {
+  function hitTest(x, y, prefer) {
+    if (prefer !== undefined && prefer !== null) return prefer
+    let best = null, bestD = 1e9
+    for (const n of nodes) {
+      const d2 = (n.x - x) ** 2 + (n.y - y) ** 2
+      if (d2 <= r(n) ** 2 + 25 && d2 < bestD) { best = n; bestD = d2 }
+    }
+    return best
+  }
+
+  let downX = 0, downY = 0, movedFar = false
+  canvas.addEventListener('pointerdown', (e) => {
     const rect = canvas.getBoundingClientRect()
     const x = e.clientX - rect.left, y = e.clientY - rect.top
-    const hit = nodes.find(n => (n.x - x) ** 2 + (n.y - y) ** 2 <= r(n) ** 2 + 16)
-    if (drag) { drag.x = x; drag.y = y; drag.vx = 0; drag.vy = 0; alpha = Math.max(alpha, 0.35) }
-    hover = hit; canvas.style.cursor = hit ? 'pointer' : 'default'
+    downX = x; downY = y; movedFar = false
+    const hit = hitTest(x, y)
+    if (hit !== null) {
+      dragNode = hit; dragX = x; dragY = y; hover = hit
+      canvas.setPointerCapture(e.pointerId)
+      canvas.style.cursor = 'grabbing'
+    }
   })
-  canvas.addEventListener('mousedown', () => { if (hover) { drag = hover; alpha = Math.max(alpha, 0.4) } })
-  window.addEventListener('mouseup', () => { drag = null })
-  canvas.addEventListener('click', () => { if (hover) location.href = '/wiki/' + encodeURIComponent(hover.id) })
+  canvas.addEventListener('pointermove', (e) => {
+    const rect = canvas.getBoundingClientRect()
+    const x = e.clientX - rect.left, y = e.clientY - rect.top
+    if (Math.abs(x - downX) + Math.abs(y - downY) > 6) movedFar = true
+    if (dragNode !== null) { dragX = x; dragY = y; hover = dragNode }
+    else hover = hitTest(x, y)
+    canvas.style.cursor = dragNode !== null ? 'grabbing' : (hover ? 'grab' : 'default')
+  })
+  canvas.addEventListener('pointerup', () => { dragNode = null; canvas.style.cursor = 'default' })
+  canvas.addEventListener('click', () => {
+    if (hover !== null && !movedFar) location.href = '/wiki/' + encodeURIComponent(hover.id)
+  })
 
   function frame() {
-    for (let i = 0; i < 3 && alpha > 0.02 && simulate; i++) tick()
+    if (simulate) for (let i = 0; i < SUBSTEPS; i++) substep()
     ctx.clearRect(0, 0, W, H)
     ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1
     for (const l of links) {
