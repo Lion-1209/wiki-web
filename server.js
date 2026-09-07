@@ -550,10 +550,10 @@ function graphPage(res) {
       const wa = (a === dragNode) ? 0 : 1 / a.mass
       const wb = (b === dragNode) ? 0 : 1 / b.mass
       const sum = wa + wb || 1
-      const ax = a.x, ay = a.y
+      const ax = a.x, ay = a.y, bx = b.x, by = b.y
       a.x += dx * diff * (wa / sum); a.y += dy * diff * (wa / sum)
       b.x -= dx * diff * (wb / sum); b.y -= dy * diff * (wb / sum)
-      const moved = Math.abs(a.x - ax) + Math.abs(ay - a.y) + Math.abs(b.x - bx) + Math.abs(b.y - by)
+      const moved = Math.abs(a.x - ax) + Math.abs(a.y - ay) + Math.abs(b.x - bx) + Math.abs(b.y - by)
       if (moved > maxMove) maxMove = moved
     }
     // overlap separation, position based
@@ -618,11 +618,19 @@ function graphPage(res) {
   })
 
   let settled = false
+  let simError = null
   function frame() {
+    // The render loop must survive simulation bugs: a thrown error here used
+    // to kill the rAF chain and blank the whole canvas.
     if (simulate && !settled) {
-      let move = 0
-      for (let i = 0; i < SUBSTEPS; i++) move = Math.max(move, substep())
-      if (move < 0.06 && dragNode === null) settled = true
+      try {
+        let move = 0
+        for (let i = 0; i < SUBSTEPS; i++) move = Math.max(move, substep())
+        if (move < 0.06 && dragNode === null) settled = true
+        simError = null
+      } catch (error) {
+        simError = String(error)
+      }
     }
     ctx.clearRect(0, 0, W, H)
     ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1
@@ -650,7 +658,8 @@ function graphPage(res) {
   const legend = document.getElementById('legend')
   legend.innerHTML = '<b>' + nodes.length + '</b> nodes · <b>' + links.length + '</b> edges · ' +
     folders.map(f => '<span style="color:' + colorOf(f) + '">■</span> ' + f).join(' · ') +
-    ' · <span style="color:#8b949e">■</span> machinery'
+    ' · <span style="color:#8b949e">■</span> machinery' +
+    (simError ? ' · <span style="color:#e74c3c">sim error: ' + simError + '</span>' : '')
 })()
 </script>`
   html(res, 200, 'Graph', body)
