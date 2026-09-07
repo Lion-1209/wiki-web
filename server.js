@@ -515,6 +515,7 @@ function graphPage(res) {
 
   function substep() {
     // integrate (dragged node is pointer-driven instead)
+    let maxMove = 0
     for (const n of nodes) {
       if (n === dragNode) continue
       const vx = (n.x - n.px) * DAMPING
@@ -522,12 +523,23 @@ function graphPage(res) {
       n.px = n.x; n.py = n.y
       n.x += vx + (W / 2 - n.x) * 0.0006
       n.y += vy + (H / 2 - n.y) * 0.0009
+      const move = Math.abs(vx) + Math.abs(vy)
+      if (move > maxMove) maxMove = move
     }
     if (dragNode) {
       // critically damped follow; px trails x so release carries momentum
       dragNode.px = dragNode.x; dragNode.py = dragNode.y
       dragNode.x += (dragX - dragNode.x) * 0.45
       dragNode.y += (dragY - dragNode.y) * 0.45
+      maxMove = 1
+    }
+    // Sequential (Gauss-Seidel) relaxation of a cyclic graph pumps a slow
+    // systematic rotation — one direction per substep, forever. Shuffling the
+    // edge order every substep removes the directional bias (Müller's cloth
+    // tutorials do the same); residual jitter decays via DAMPING.
+    for (let i = links.length - 1; i > 0; i--) {
+      const j = (Math.random() * (i + 1)) | 0
+      const t = links[i]; links[i] = links[j]; links[j] = t
     }
     // edges relax toward rest length, mass-weighted, dragged node immovable
     for (const l of links) {
@@ -538,8 +550,11 @@ function graphPage(res) {
       const wa = (a === dragNode) ? 0 : 1 / a.mass
       const wb = (b === dragNode) ? 0 : 1 / b.mass
       const sum = wa + wb || 1
+      const ax = a.x, ay = a.y
       a.x += dx * diff * (wa / sum); a.y += dy * diff * (wa / sum)
       b.x -= dx * diff * (wb / sum); b.y -= dy * diff * (wb / sum)
+      const moved = Math.abs(a.x - ax) + Math.abs(ay - a.y) + Math.abs(b.x - bx) + Math.abs(b.y - by)
+      if (moved > maxMove) maxMove = moved
     }
     // overlap separation, position based
     for (let i = 0; i < nodes.length; i++) for (let j = i + 1; j < nodes.length; j++) {
@@ -553,6 +568,8 @@ function graphPage(res) {
       dx *= push; dy *= push
       if (a !== dragNode) { a.x -= dx * 0.5; a.y -= dy * 0.5 }
       if (b !== dragNode) { b.x += dx * 0.5; b.y += dy * 0.5 }
+      const moved = Math.abs(dx) + Math.abs(dy)
+      if (moved > maxMove) maxMove = moved
     }
     for (const n of nodes) {
       const rad = r(n)
@@ -561,6 +578,7 @@ function graphPage(res) {
       if (n.y < rad) { n.y = rad; n.py = n.y }
       if (n.y > H - rad) { n.y = H - rad; n.py = n.y }
     }
+    return maxMove
   }
 
   function hitTest(x, y, prefer) {
@@ -579,6 +597,7 @@ function graphPage(res) {
     const x = e.clientX - rect.left, y = e.clientY - rect.top
     downX = x; downY = y; movedFar = false
     const hit = hitTest(x, y)
+    settled = false
     if (hit !== null) {
       dragNode = hit; dragX = x; dragY = y; hover = hit
       canvas.setPointerCapture(e.pointerId)
@@ -598,8 +617,13 @@ function graphPage(res) {
     if (hover !== null && !movedFar) location.href = '/wiki/' + encodeURIComponent(hover.id)
   })
 
+  let settled = false
   function frame() {
-    if (simulate) for (let i = 0; i < SUBSTEPS; i++) substep()
+    if (simulate && !settled) {
+      let move = 0
+      for (let i = 0; i < SUBSTEPS; i++) move = Math.max(move, substep())
+      if (move < 0.06 && dragNode === null) settled = true
+    }
     ctx.clearRect(0, 0, W, H)
     ctx.strokeStyle = '#30363d'; ctx.lineWidth = 1
     for (const l of links) {
