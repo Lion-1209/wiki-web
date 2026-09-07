@@ -209,7 +209,7 @@ function layout(title, body) {
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${esc(title)} — dsh-wiki-web</title>
-<script>window.addEventListener('error', e => { (window.__errs = window.__errs || []).push(String(e.message)) }); window.addEventListener('unhandledrejection', e => { (window.__errs = window.__errs || []).push('rejection: ' + (e.reason && e.reason.stack ? e.reason.stack.split('\n').slice(0, 2).join(' | ') : String(e.reason))) })</script>
+<script>window.addEventListener('error', e => { (window.__errs = window.__errs || []).push(String(e.message)) }); window.addEventListener('unhandledrejection', e => { (window.__errs = window.__errs || []).push('rejection: ' + (e.reason && e.reason.stack ? e.reason.stack.split(String.fromCharCode(10)).slice(0, 2).join(' | ') : String(e.reason))) })</script>
 <style>${CSS}</style>
 </head><body>
 <header>
@@ -522,9 +522,6 @@ function graphPage(res) {
     return best
   }
 
-  // mouse events (not pointer events): they fire for real users and for
-  // synthetic input alike, and window-level move/up keep the drag alive when
-  // the pointer leaves the canvas mid-drag.
   canvas.addEventListener('mousedown', (e) => {
     const hit = hitTest(e, null)
     downAt = { x: e.clientX, y: e.clientY, node: hit, moved: false }
@@ -586,7 +583,7 @@ function graphPage(res) {
   legend.innerHTML = '<b>' + nodes.length + '</b> nodes · <b>' + links.length + '</b> edges · ' +
     folders.map(f => '<span style="color:' + colorOf(f) + '">■</span> ' + f).join(' · ') +
     ' · <span style="color:#8b949e">■</span> machinery'
-} })()
+})()
 </script>`
   html(res, 200, 'Graph', body)
 }
