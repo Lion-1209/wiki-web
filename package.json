@@ -1,7 +1,7 @@
 {
   "name": "dsh-wiki-web",
-  "version": "0.2.0",
-  "description": "Self-hosted web UI for a dsh wiki vault: browse, BM25 search, lint dashboard — no Obsidian required.",
+  "version": "0.2.1",
+  "description": "Self-hosted web UI for your Markdown wiki vault: browse, BM25 search, link graph, lint dashboard — no Obsidian, no database. Standalone, or pair with dsh agent plugins.",
   "license": "MIT",
   "type": "module",
   "main": "server.js",

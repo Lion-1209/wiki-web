@@ -1,8 +1,8 @@
 # dsh-wiki-web
 
-Self-hosted web UI over a [dsh](https://github.com/deepseek-ai/deepseek-harness) wiki vault: browse pages with resolved wikilinks, BM25 full-text search, backlinks, and a live lint dashboard. **No Obsidian required** — and no database either: the vault stays a plain Markdown directory you own, fully compatible with Obsidian and any other Markdown tool.
+A self-hosted web UI for your Markdown wiki vault: browse pages with resolved wikilinks, BM25 full-text search, backlinks, and a live lint dashboard. **No Obsidian, no database, no build step** — the vault stays a plain Markdown directory you own, fully compatible with Obsidian and any other Markdown tool. Use it entirely standalone, or let an AI agent manage the vault for you.
 
-Powered by the [dsh-plugin-wiki-tools](https://github.com/Lion-1209/dsh-plugin-wiki-tools) engine — the same vault, bookkeeping, search, and health-check core the dsh agent tools use.
+Powered by the [dsh-plugin-wiki-tools](https://github.com/Lion-1209/dsh-plugin-wiki-tools) engine — the same battle-tested vault, bookkeeping, search, and health-check core the dsh agent tools use. The engine is a plain ESM library with zero framework dependencies, so the web UI works fully standalone.
 
 ## Quick start
 
@@ -33,7 +33,9 @@ Read-only by design: the vault is your source of truth, and the AI does the writ
 
 ## Pairing with an agent
 
-The web UI is the human half. For AI management, point an agent at the same vault:
+The web UI is the human half. For AI management, point any supported agent at the same vault — it writes through the same engine, so the bookkeeping (indexes, log, frontmatter) stays consistent no matter who writes.
+
+**DeepSeek Harness (dsh)** — first-class plugins:
 
 ```sh
 dsh plugin --profile web add dsh-plugin-wiki-tools
@@ -42,11 +44,13 @@ dsh plugin --profile web add dsh-plugin-wiki-tools
 
 Chat in dsh: *"把这篇文章收进知识库"* — pages, cross-references, indexes, and the log update automatically; refresh this web UI to see the result.
 
+**Any MCP-capable agent** — on the roadmap (see below); the same vault tools will be exposed over MCP so Claude Desktop, Cursor, and friends can manage the vault too.
+
 ## Roadmap
 
 - [ ] Graph visualization (force-directed link map)
 - [ ] In-browser editing via `wiki_write` (bookkeeping included for free)
-- [ ] MCP server mode — let any MCP-capable agent manage the same vault
+- [ ] MCP server mode — let any MCP-capable agent manage the same vault (planned next)
 - [ ] Docker one-liner
 - [ ] Multi-vault support
 
