@@ -1,5 +1,5 @@
 {
-  "name": "@lion1209/wiki-web",
+  "name": "@lioncao/wiki-web",
   "version": "0.3.0",
   "description": "Self-hosted web UI for your Markdown wiki vault: browse, BM25 search, link graph, lint dashboard. No Obsidian, no database. Standalone, or pair with dsh agent plugins.",
   "license": "MIT",

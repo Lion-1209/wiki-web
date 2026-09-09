@@ -7,7 +7,7 @@ Powered by the [dsh-plugin-wiki-tools](https://github.com/Lion-1209/dsh-plugin-w
 ## Quick start
 
 ```sh
-npx @lion1209/wiki-web --vault /path/to/your/vault
+npx @lioncao/wiki-web --vault /path/to/your/vault
 ```
 
 or clone and run:
