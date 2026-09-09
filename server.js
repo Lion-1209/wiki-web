@@ -179,11 +179,13 @@ blockquote { margin: 0; padding: 4px 14px; border-left: 3px solid #d0d7de; color
 .badge.warn { background: #fff8c5; color: #9a6700; }
 .badge.info { background: #ddf4ff; color: #0969da; }
 .meta { color: #656d76; font-size: 13px; }
-.sidebar { float: right; width: 260px; margin-left: 20px; }
-.sidebar .card { padding: 12px 16px; margin-bottom: 14px; }
-.sidebar ul { list-style: none; margin: 4px 0; padding: 0; }
-.sidebar li { padding: 1px 0; }
-.sidebar li.folder { color: #656d76; font-size: 12px; font-weight: 600; text-transform: uppercase; margin-top: 8px; }
+.pagecols { display: flex; gap: 20px; align-items: flex-start; }
+.pagecol-main { flex: 1; min-width: 0; }
+.pagecol-side { width: 260px; flex-shrink: 0; }
+.pagecol-side .card { padding: 12px 16px; margin-bottom: 14px; }
+.pagecol-side ul { list-style: none; margin: 4px 0; padding: 0; }
+.pagecol-side li { padding: 1px 0; }
+.pagecol-side li.folder { color: #656d76; font-size: 12px; font-weight: 600; text-transform: uppercase; margin-top: 8px; }
 .snippet { color: #57606a; font-size: 13px; margin-top: 2px; }
 .clear { clear: both; }
 input[type=text] { padding: 6px 10px; border: 1px solid #d0d7de; border-radius: 6px; width: 320px; }
@@ -281,7 +283,7 @@ function sidebarFor(list, current) {
       `<li>${page.name === current ? `<b>${esc(page.name)}</b>` : `<a href="/wiki/${encodeURIComponent(page.name)}">${esc(page.name)}</a>`}</li>`).join('')
     return `<li class="folder">${esc(folder)}</li>${links}`
   }).join('')
-  return `<div class="sidebar"><div class="card"><b>${list.length} pages</b><ul>${items}</ul></div></div>`
+  return `<div class="pagecol-side"><div class="card"><b>${list.length} pages</b><ul>${items}</ul></div></div>`
 }
 
 async function pageView(res, rawName, saved = false, status = 200) {
@@ -309,9 +311,7 @@ async function pageView(res, rawName, saved = false, status = 200) {
   const rendered = page.name.toLowerCase() === 'index'
     ? collapseIndexSections(page.content)
     : page.content
-  const body = `
-${sidebarFor(list, page.name)}
-${saved ? '<div class="card" style="border-color:#1a7f37"><span class="badge" style="background:#dafbe1;color:#1a7f37">saved</span> page written through the engine — frontmatter, indexes, and log updated.</div>' : ''}
+  const mainCol = `
 <h1>${esc(page.name)}</h1>
 <p class="meta">${isMachineryPage(page.name) ? 'vault machinery · ' : ''}${esc(page.rel)} · <a href="/wiki/${encodeURIComponent(page.name)}?edit=1">✏️ edit</a></p>
 ${metaRows ? `<div class="card"><table>${metaRows}</table></div>` : ''}
@@ -320,6 +320,11 @@ ${metaRows ? `<div class="card"><table>${metaRows}</table></div>` : ''}
     : `<ul>${outgoing.map((target) => `<li>${wikilink(target, target)}${dead.includes(target) ? ' <span class="badge error">dead</span>' : ''}</li>`).join('')}</ul>`}</div>
 <div class="card"><h2>Backlinks (${backlinks.length})</h2>${backlinks.length === 0 ? '<p class="meta">no other page links here yet</p>'
     : `<ul>${backlinks.map((candidate) => `<li><a href="/wiki/${encodeURIComponent(candidate.name)}">${esc(candidate.name)}</a></li>`).join('')}</ul>`}</div>`
+  const body = `
+<div class="pagecols">
+<div class="pagecol-main">${saved ? '<div class="card" style="border-color:#1a7f37"><span class="badge" style="background:#dafbe1;color:#1a7f37">saved</span> page written through the engine — frontmatter, indexes, and log updated.</div>' : ''}${mainCol}</div>
+${sidebarFor(list, page.name)}
+</div>`
   html(res, status, page.name, body)
 }
 
