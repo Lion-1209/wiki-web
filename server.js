@@ -225,7 +225,7 @@ function layout(title, body) {
   <form action="/search" method="get"><input type="search" name="q" placeholder="Search the vault…" required> <button>Search</button></form>
 </header>
 <main>${body}</main>
-<footer>vault: ${esc(VAULT)} · dsh-wiki-web 0.2.0 · vault stays plain Markdown on disk</footer>
+<footer>vault: ${esc(VAULT)} · wiki-web 0.3.0 · vault stays plain Markdown on disk</footer>
 </body></html>`
 }
 
@@ -763,6 +763,6 @@ if (!Number.isInteger(PORT) || PORT <= 0) {
   process.exit(1)
 }
 server.listen(PORT, HOST, () => {
-  console.log(`dsh-wiki-web serving ${VAULT}`)
+  console.log(`wiki-web serving ${VAULT}`)
   console.log(`  → http://${HOST}:${PORT}`)
 })

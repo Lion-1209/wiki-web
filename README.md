@@ -1,4 +1,4 @@
-# dsh-wiki-web
+# wiki-web
 
 A self-hosted web UI for your Markdown wiki vault: browse pages with resolved wikilinks, BM25 full-text search, backlinks, and a live lint dashboard. **No Obsidian, no database, no build step** — the vault stays a plain Markdown directory you own, fully compatible with Obsidian and any other Markdown tool. Use it entirely standalone, or let an AI agent manage the vault for you.
 
@@ -7,14 +7,14 @@ Powered by the [dsh-plugin-wiki-tools](https://github.com/Lion-1209/dsh-plugin-w
 ## Quick start
 
 ```sh
-npx dsh-wiki-web --vault /path/to/your/vault
+npx @lion1209/wiki-web --vault /path/to/your/vault
 ```
 
 or clone and run:
 
 ```sh
-git clone https://github.com/Lion-1209/dsh-wiki-web
-cd dsh-wiki-web && npm install
+git clone https://github.com/Lion-1209/wiki-web
+cd wiki-web && npm install
 node server.js --vault /path/to/your/vault --port 3210
 ```
 
